@@ -10,7 +10,7 @@ This library provides both a net.Listener and net.Conn implementation that
 can be used to handle situation in which you may be using the proxy protocol.
 Proxy protocol version 1 and 2 supported.
 
-The only caveat is that we check for the "PROXY " prefix to determine if the protocol
+The only caveat is that we check for the header prefix to determine if the protocol
 is being used. If that string may occur as part of your input, then it is ambiguous
 if the protocol is being used and you may have problems.
 
