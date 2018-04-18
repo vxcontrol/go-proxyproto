@@ -2,6 +2,7 @@ package proxyproto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -379,5 +380,173 @@ func testParse_ipv4_checkfunc(t *testing.T) {
 		if addr.Port == 1000 {
 			t.Fatalf("bad: %v", addr)
 		}
+	}
+}
+
+func TestParse_v2_ipv4(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	pl := &Listener{Listener: l}
+
+	go func() {
+		conn, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		defer conn.Close()
+
+		// Write out the header!
+		ipaddrSrc := net.ParseIP("10.1.1.1")
+		portSrc := uint16(80)
+		ipaddrDst := net.ParseIP("192.55.100.1")
+		portDst := uint16(81)
+
+		header := []byte{}
+		data := []byte{}
+		tmp := make([]byte, 4)
+		header = append(header, prefixV2...)
+		header = append(header, commandProxy)
+		header = append(header, addressFamilyInet|transportProtoStream)
+
+		binary.BigEndian.PutUint16(tmp, portSrc)
+		data = append(data, ipaddrSrc[12:16]...)
+
+		binary.BigEndian.PutUint16(tmp, portSrc)
+		data = append(data, tmp[0:2]...)
+
+		data = append(data, ipaddrDst[12:16]...)
+		binary.BigEndian.PutUint16(tmp, portDst)
+		data = append(data, tmp[0:2]...)
+
+		binary.BigEndian.PutUint16(tmp, uint16(len(data)))
+		header = append(header, tmp...)
+
+		conn.Write([]byte(header))
+		conn.Write([]byte(data))
+
+		conn.Write([]byte("ping"))
+		recv := make([]byte, 4)
+		_, err = conn.Read(recv)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !bytes.Equal(recv, []byte("pong")) {
+			t.Fatalf("bad: %v - %v", recv, string(recv))
+		}
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer conn.Close()
+
+	recv := make([]byte, 4)
+	_, err = conn.Read(recv)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !bytes.Equal(recv, []byte("ping")) {
+		t.Fatalf("bad: %v - %v", recv, string(recv))
+	}
+
+	if _, err := conn.Write([]byte("pong")); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Check the remote addr
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "10.1.1.1" {
+		t.Fatalf("bad: %v", addr)
+	}
+	if addr.Port != 80 {
+		t.Fatalf("bad: %v", addr)
+	}
+}
+
+func TestParse_v2_ipv6(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	pl := &Listener{Listener: l}
+
+	go func() {
+		conn, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		defer conn.Close()
+
+		// Write out the header!
+		ipaddrSrc := net.ParseIP("ffff::ffff")
+		portSrc := uint16(80)
+		ipaddrDst := net.ParseIP("ffff::ffff")
+		portDst := uint16(81)
+
+		header := []byte{}
+		data := []byte{}
+		tmp := make([]byte, 4)
+		header = append(header, prefixV2...)
+		header = append(header, commandProxy)
+		header = append(header, addressFamilyInet6|transportProtoStream)
+
+		binary.BigEndian.PutUint16(tmp, portSrc)
+		data = append(data, ipaddrSrc...)
+
+		binary.BigEndian.PutUint16(tmp, portSrc)
+		data = append(data, tmp[0:2]...)
+
+		data = append(data, ipaddrDst...)
+		binary.BigEndian.PutUint16(tmp, portDst)
+		data = append(data, tmp[0:2]...)
+
+		binary.BigEndian.PutUint16(tmp, uint16(len(data)))
+		header = append(header, tmp...)
+
+		conn.Write([]byte(header))
+		conn.Write([]byte(data))
+
+		conn.Write([]byte("ping"))
+		recv := make([]byte, 4)
+		_, err = conn.Read(recv)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !bytes.Equal(recv, []byte("pong")) {
+			t.Fatalf("bad: %v - %v", recv, string(recv))
+		}
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer conn.Close()
+
+	recv := make([]byte, 4)
+	_, err = conn.Read(recv)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !bytes.Equal(recv, []byte("ping")) {
+		t.Fatalf("bad: %v - %v", recv, string(recv))
+	}
+
+	if _, err := conn.Write([]byte("pong")); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Check the remote addr
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "ffff::ffff" {
+		t.Fatalf("bad: %v", addr.IP.String())
+	}
+	if addr.Port != 80 {
+		t.Fatalf("bad: %v", addr)
 	}
 }
