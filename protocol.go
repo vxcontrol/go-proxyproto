@@ -349,6 +349,7 @@ func (p *Conn) checkPrefix() error {
 			dstIP = data[18:34]
 			dstPort = binary.BigEndian.Uint16(data[34:36])
 		} else if transportProtocolAndAddressFamily&addressFamilyUnix == addressFamilyUnix {
+			p.conn.Close()
 			return fmt.Errorf("unix protocol not supported")
 		}
 
