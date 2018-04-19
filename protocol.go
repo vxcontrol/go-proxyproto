@@ -18,9 +18,7 @@ import (
 var (
 	// prefix is the string we look for at the start of a connection
 	// to check if this connection is using the proxy protocol
-	prefix    = []byte("PROXY ")
-	prefixLen = len(prefix)
-
+	prefixV1    = []byte("PROXY ")
 	prefixV2    = []byte("\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A")
 	prefixV2Len = len(prefixV2)
 
@@ -36,10 +34,6 @@ var (
 	transportProtoUnspec = byte('\x00')
 	transportProtoStream = byte('\x01')
 	transportProtoDgram  = byte('\x02')
-
-	addrLenIPV4 = uint16(12)
-	addrLenIPV6 = uint16(36)
-	addrLenUNIX = uint16(216)
 
 	ErrInvalidUpstream = errors.New("upstream connection address not trusted for PROXY information")
 )
@@ -188,6 +182,10 @@ func (p *Conn) SetWriteDeadline(t time.Time) error {
 func (p *Conn) checkPrefix() error {
 	var hdr []byte
 	var err error
+	var srcIP net.IP
+	var dstIP net.IP
+	var srcPort int
+	var dstPort int
 
 	if p.proxyHeaderTimeout != 0 {
 		readDeadLine := time.Now().Add(p.proxyHeaderTimeout)
@@ -202,21 +200,20 @@ func (p *Conn) checkPrefix() error {
 		if err != nil {
 			if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
 
 		// Check for a prefix mis-match, quit early
-		if !bytes.HasPrefix(prefix, inp) && !bytes.HasPrefix(prefixV2, inp) {
+		if !bytes.HasPrefix(prefixV1, inp) && !bytes.HasPrefix(prefixV2, inp) {
 			return nil
-		} else if bytes.Equal(inp, prefix) || bytes.Equal(inp, prefixV2) {
+		} else if bytes.Equal(inp, prefixV1) || bytes.Equal(inp, prefixV2) {
 			hdr = inp
 			break
 		}
 	}
 
-	if bytes.HasPrefix(hdr, prefix) {
+	if bytes.HasPrefix(hdr, prefixV1) {
 		// Version 1 of the protocol
 		// Read the header line
 		header, err := p.bufReader.ReadString('\n')
@@ -245,30 +242,30 @@ func (p *Conn) checkPrefix() error {
 		}
 
 		// Parse out the source address
-		ip := net.ParseIP(parts[2])
-		if ip == nil {
+		srcIP = net.ParseIP(parts[2])
+		if srcIP == nil {
 			p.conn.Close()
 			return fmt.Errorf("Invalid source ip: %s", parts[2])
 		}
-		port, err := strconv.Atoi(parts[4])
+		srcPort, err = strconv.Atoi(parts[4])
 		if err != nil {
 			p.conn.Close()
 			return fmt.Errorf("Invalid source port: %s", parts[4])
 		}
-		p.srcAddr = &net.TCPAddr{IP: ip, Port: port}
+		p.srcAddr = &net.TCPAddr{IP: srcIP, Port: srcPort}
 
 		// Parse out the destination address
-		ip = net.ParseIP(parts[3])
-		if ip == nil {
+		dstIP = net.ParseIP(parts[3])
+		if dstIP == nil {
 			p.conn.Close()
 			return fmt.Errorf("Invalid destination ip: %s", parts[3])
 		}
-		port, err = strconv.Atoi(parts[5])
+		dstPort, err = strconv.Atoi(parts[5])
 		if err != nil {
 			p.conn.Close()
 			return fmt.Errorf("Invalid destination port: %s", parts[5])
 		}
-		p.dstAddr = &net.TCPAddr{IP: ip, Port: port}
+		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: dstPort}
 	} else if bytes.HasPrefix(hdr, prefixV2) {
 		// Version 2 of the protocol
 		var b byte
@@ -278,10 +275,6 @@ func (p *Conn) checkPrefix() error {
 		var dataLengthB []byte
 		var data []byte
 		var dataLength uint16
-		var srcIP net.IP
-		var dstIP net.IP
-		var srcPort uint16
-		var dstPort uint16
 
 		signature = make([]byte, prefixV2Len)
 		dataLengthB = make([]byte, 4)
@@ -305,7 +298,8 @@ func (p *Conn) checkPrefix() error {
 		protocolVersionAndCommand = b
 
 		if protocolVersionAndCommand != commandProxy {
-			return errors.New("only version 2 and proxy command is supported")
+			p.conn.Close()
+			return fmt.Errorf("only version 2 and proxy command is supported, got: % x", protocolVersionAndCommand)
 		}
 
 		// Read transport protocol and address family
@@ -340,21 +334,26 @@ func (p *Conn) checkPrefix() error {
 
 		if transportProtocolAndAddressFamily&addressFamilyInet == addressFamilyInet {
 			srcIP = net.IPv4(data[0], data[1], data[2], data[3])
-			srcPort = binary.BigEndian.Uint16(data[4:6])
+			srcPort = int(binary.BigEndian.Uint16(data[4:6]))
 			dstIP = net.IPv4(data[6], data[7], data[8], data[9])
-			dstPort = binary.BigEndian.Uint16(data[10:12])
+			dstPort = int(binary.BigEndian.Uint16(data[10:12]))
 		} else if transportProtocolAndAddressFamily&addressFamilyInet6 == addressFamilyInet6 {
 			srcIP = data[0:16]
-			srcPort = binary.BigEndian.Uint16(data[16:18])
+			srcPort = int(binary.BigEndian.Uint16(data[16:18]))
 			dstIP = data[18:34]
-			dstPort = binary.BigEndian.Uint16(data[34:36])
+			dstPort = int(binary.BigEndian.Uint16(data[34:36]))
 		} else if transportProtocolAndAddressFamily&addressFamilyUnix == addressFamilyUnix {
 			p.conn.Close()
 			return fmt.Errorf("unix protocol not supported")
 		}
 
-		p.srcAddr = &net.TCPAddr{IP: srcIP, Port: int(srcPort)}
-		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: int(dstPort)}
+		if srcIP == nil || dstIP == nil {
+			p.conn.Close()
+			return fmt.Errorf("source or destination IP incorrect")
+		}
+
+		p.srcAddr = &net.TCPAddr{IP: srcIP, Port: srcPort}
+		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: dstPort}
 	}
 
 	return nil
