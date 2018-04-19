@@ -7,12 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/Sirupsen/logrus"
 )
 
 var (
@@ -36,6 +37,7 @@ var (
 	transportProtoDgram  = byte('\x02')
 
 	ErrInvalidUpstream = errors.New("upstream connection address not trusted for PROXY information")
+	EnableDebugging    = false
 )
 
 // SourceChecker can be used to decide whether to trust the PROXY info or pass
@@ -213,9 +215,18 @@ func (p *Conn) checkPrefix() error {
 		}
 	}
 
+	if EnableDebugging {
+		log.Debugf("header: % x", hdr)
+	}
+
 	if bytes.HasPrefix(hdr, prefixV1) {
 		// Version 1 of the protocol
 		// Read the header line
+
+		if EnableDebugging {
+			log.Debugf("tcp proxy protocol version 1 detected")
+		}
+
 		header, err := p.bufReader.ReadString('\n')
 		if err != nil {
 			p.conn.Close()
@@ -268,6 +279,11 @@ func (p *Conn) checkPrefix() error {
 		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: dstPort}
 	} else if bytes.HasPrefix(hdr, prefixV2) {
 		// Version 2 of the protocol
+
+		if EnableDebugging {
+			log.Debugf("tcp proxy protocol version 2 detected")
+		}
+
 		var b byte
 		var signature []byte
 		var protocolVersionAndCommand byte
@@ -289,6 +305,10 @@ func (p *Conn) checkPrefix() error {
 			signature[i] = b
 		}
 
+		if EnableDebugging {
+			log.Debugf("version 2 signature: % x", signature)
+		}
+
 		// Read protocol version and command
 		b, err = p.bufReader.ReadByte()
 		if err != nil {
@@ -296,6 +316,10 @@ func (p *Conn) checkPrefix() error {
 			return err
 		}
 		protocolVersionAndCommand = b
+
+		if EnableDebugging {
+			log.Debugf("version 2 protocol version and command: % x", protocolVersionAndCommand)
+		}
 
 		if protocolVersionAndCommand != commandProxy {
 			p.conn.Close()
@@ -310,6 +334,10 @@ func (p *Conn) checkPrefix() error {
 		}
 		transportProtocolAndAddressFamily = b
 
+		if EnableDebugging {
+			log.Debugf("version 2 protocol transport protocol and address family: % x", transportProtocolAndAddressFamily)
+		}
+
 		// Read data length
 		for i := 0; i < 4; i++ {
 			b, err = p.bufReader.ReadByte()
@@ -322,6 +350,10 @@ func (p *Conn) checkPrefix() error {
 
 		dataLength = binary.BigEndian.Uint16(dataLengthB)
 
+		if EnableDebugging {
+			log.Debugf("version 2 data length: %v", dataLength)
+		}
+
 		data = make([]byte, dataLength)
 		for i := uint16(0); i < dataLength; i++ {
 			b, err = p.bufReader.ReadByte()
@@ -330,6 +362,11 @@ func (p *Conn) checkPrefix() error {
 				return err
 			}
 			data[i] = b
+		}
+
+		if EnableDebugging {
+			log.Debugf("version 2 data hex: % x", data)
+			log.Debugf("version 2 data bytes: %v", data)
 		}
 
 		if transportProtocolAndAddressFamily&addressFamilyInet == addressFamilyInet {
