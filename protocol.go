@@ -391,6 +391,22 @@ func (p *Conn) checkPrefix() error {
 
 		p.srcAddr = &net.TCPAddr{IP: srcIP, Port: srcPort}
 		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: dstPort}
+
+		if EnableDebugging {
+			var inp []byte
+			inp, err = p.bufReader.Peek(2)
+
+			if err != nil {
+				if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+					return nil
+				}
+				return err
+			}
+
+			log.Debugf("version 2 following 2 bytes hex: % x", inp)
+			log.Debugf("version 2 following 2 bytes bytes: %v", inp)
+		}
+
 	}
 
 	return nil
