@@ -36,6 +36,11 @@ var (
 	transportProtoStream = byte('\x01')
 	transportProtoDgram  = byte('\x02')
 
+	tcpOverIPV4 = addressFamilyInet | transportProtoStream
+	tcpOverIPV6 = addressFamilyInet6 | transportProtoStream
+	udpOverIPV4 = addressFamilyInet | transportProtoDgram
+	udpOverIPV6 = addressFamilyInet6 | transportProtoDgram
+
 	ErrInvalidUpstream = errors.New("upstream connection address not trusted for PROXY information")
 	EnableDebugging    = false
 )
@@ -336,6 +341,12 @@ func (p *Conn) checkPrefix() error {
 
 		if EnableDebugging {
 			log.Debugf("version 2 protocol transport protocol and address family: % x", transportProtocolAndAddressFamily)
+		}
+
+		if transportProtocolAndAddressFamily != tcpOverIPV4 && transportProtocolAndAddressFamily != tcpOverIPV6 &&
+			transportProtocolAndAddressFamily != udpOverIPV4 && transportProtocolAndAddressFamily != udpOverIPV6 {
+			p.conn.Close()
+			return fmt.Errorf("only ipv4 and ipv6 address families supported")
 		}
 
 		// Read data length
