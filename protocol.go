@@ -293,7 +293,7 @@ func (p *Conn) checkPrefix() error {
 		var dataLength uint16
 
 		signature = make([]byte, prefixV2Len)
-		dataLengthB = make([]byte, 4)
+		dataLengthB = make([]byte, 2)
 
 		// Read signature
 		for i := 0; i < prefixV2Len; i++ {
@@ -339,7 +339,7 @@ func (p *Conn) checkPrefix() error {
 		}
 
 		// Read data length
-		for i := 0; i < 4; i++ {
+		for i := 0; i < 2; i++ {
 			b, err = p.bufReader.ReadByte()
 			if err != nil {
 				p.conn.Close()
@@ -391,22 +391,6 @@ func (p *Conn) checkPrefix() error {
 
 		p.srcAddr = &net.TCPAddr{IP: srcIP, Port: srcPort}
 		p.dstAddr = &net.TCPAddr{IP: dstIP, Port: dstPort}
-
-		if EnableDebugging {
-			var inp []byte
-			inp, err = p.bufReader.Peek(2)
-
-			if err != nil {
-				if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
-					return nil
-				}
-				return err
-			}
-
-			log.Debugf("version 2 following 2 bytes hex: % x", inp)
-			log.Debugf("version 2 following 2 bytes bytes: %v", inp)
-		}
-
 	}
 
 	return nil

@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"os"
 	"testing"
 	"time"
+
+	log "github.com/Sirupsen/logrus"
 )
 
 const (
@@ -406,7 +409,7 @@ func TestParse_v2_ipv4(t *testing.T) {
 
 		header := []byte{}
 		data := []byte{}
-		tmp := make([]byte, 4)
+		tmp := make([]byte, 2)
 		header = append(header, prefixV2...)
 		header = append(header, commandProxy)
 		header = append(header, addressFamilyInet|transportProtoStream)
@@ -467,6 +470,11 @@ func TestParse_v2_ipv4(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	log.SetLevel(log.DebugLevel)
+	os.Exit(m.Run())
+}
+
 func TestParse_v2_ipv6(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -490,7 +498,7 @@ func TestParse_v2_ipv6(t *testing.T) {
 
 		header := []byte{}
 		data := []byte{}
-		tmp := make([]byte, 4)
+		tmp := make([]byte, 2)
 		header = append(header, prefixV2...)
 		header = append(header, commandProxy)
 		header = append(header, addressFamilyInet6|transportProtoStream)
@@ -504,6 +512,8 @@ func TestParse_v2_ipv6(t *testing.T) {
 		data = append(data, ipaddrDst...)
 		binary.BigEndian.PutUint16(tmp, portDst)
 		data = append(data, tmp[0:2]...)
+
+		data = append(data, []byte("some-extra-data-what-should-be-discarded\x01\x01")...)
 
 		binary.BigEndian.PutUint16(tmp, uint16(len(data)))
 		header = append(header, tmp...)
