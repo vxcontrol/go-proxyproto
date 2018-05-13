@@ -93,6 +93,10 @@ func (p *Listener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if EnableDebugging {
+		log.Debugf("tcp proxy protocol connection accepted from: %v...", conn.RemoteAddr())
+	}
 	var useConnRemoteAddr bool
 	if p.SourceCheck != nil {
 		allowed, err := p.SourceCheck(conn.RemoteAddr())
@@ -194,6 +198,10 @@ func (p *Conn) checkPrefix() error {
 	var srcPort int
 	var dstPort int
 
+	if EnableDebugging {
+		log.Debugf("tcp proxy protocol check prefix, timeout: %v...", p.proxyHeaderTimeout)
+	}
+
 	if p.proxyHeaderTimeout != 0 {
 		readDeadLine := time.Now().Add(p.proxyHeaderTimeout)
 		p.conn.SetReadDeadline(readDeadLine)
@@ -205,6 +213,9 @@ func (p *Conn) checkPrefix() error {
 		inp, err = p.bufReader.Peek(i)
 
 		if err != nil {
+			if EnableDebugging {
+				log.Debugf("tcp proxy protocol peek error: %v...", err)
+			}
 			if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
 				return nil
 			}
@@ -213,6 +224,9 @@ func (p *Conn) checkPrefix() error {
 
 		// Check for a prefix mis-match, quit early
 		if !bytes.HasPrefix(prefixV1, inp) && !bytes.HasPrefix(prefixV2, inp) {
+			if EnableDebugging {
+				log.Debugf("tcp proxy protocol header missing")
+			}
 			return nil
 		} else if bytes.Equal(inp, prefixV1) || bytes.Equal(inp, prefixV2) {
 			hdr = inp

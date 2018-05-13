@@ -28,6 +28,7 @@ func TestPassthrough(t *testing.T) {
 	}
 
 	pl := &Listener{Listener: l}
+	EnableDebugging = true
 
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
