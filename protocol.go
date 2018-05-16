@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -138,6 +138,9 @@ func NewConn(conn net.Conn, timeout time.Duration) *Conn {
 // it is returned and the socket is closed.
 func (p *Conn) Read(b []byte) (int, error) {
 	var err error
+	if EnableDebugging {
+		log.Debugf("tcp proxy protocol Read...")
+	}
 	p.once.Do(func() { err = p.checkPrefix() })
 	if err != nil {
 		return 0, err
@@ -165,6 +168,9 @@ func (p *Conn) LocalAddr() net.Addr {
 // client is slow. Using a Deadline is recommended if this is called
 // before Read()
 func (p *Conn) RemoteAddr() net.Addr {
+	if EnableDebugging {
+		log.Debugf("tcp proxy protocol RemoteAddr...")
+	}
 	p.once.Do(func() {
 		if err := p.checkPrefix(); err != nil && err != io.EOF {
 			log.Printf("[ERR] Failed to read proxy prefix: %v", err)
@@ -211,6 +217,10 @@ func (p *Conn) checkPrefix() error {
 	for i := 1; i <= prefixV2Len; i++ {
 		var inp []byte
 		inp, err = p.bufReader.Peek(i)
+
+		if EnableDebugging {
+			log.Debugf("tcp proxy protocol peek(%v): %v...", i, inp)
+		}
 
 		if err != nil {
 			if EnableDebugging {
