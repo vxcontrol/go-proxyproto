@@ -3,6 +3,7 @@ package proxyproto
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ var (
 	// to check if this connection is using the proxy protocol
 	prefixV1    = []byte("PROXY ")
 	prefixV2    = []byte("\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A")
+	prefixV1Len = len(prefixV1)
 	prefixV2Len = len(prefixV2)
 
 	// this also containes version bits which is always 0x2
@@ -60,6 +62,36 @@ var (
 // address claimed in the PROXY info.
 type SourceChecker func(net.Addr) (bool, error)
 
+// rewindConn is used to playback bytes we read during probing for the PROXY header
+type rewindConn struct {
+	net.Conn
+	peekBuffer *bytes.Reader
+}
+
+func newRewindConn(conn net.Conn, peekBuffer *bytes.Reader) *rewindConn {
+	return &rewindConn{
+		peekBuffer: peekBuffer,
+		Conn:       conn,
+	}
+}
+
+func (p *rewindConn) Read(target []byte) (int, error) {
+	if p.peekBuffer != nil {
+		// If we have a peekBuffer around, read as much as we can from it. If we have read everything,
+		// this read will trigger EOF and we will fall through to the base connection
+		rb, err := p.peekBuffer.Read(target)
+		if err == nil {
+			return rb, nil
+		}
+		if err == io.EOF {
+			p.peekBuffer = nil
+			return rb, nil
+		}
+		return 0, err
+	}
+	return p.Conn.Read(target)
+}
+
 // Listener is used to wrap an underlying listener,
 // whose connections may be using the HAProxy Proxy Protocol (version 1).
 // If the connection is using the protocol, the RemoteAddr() will return
@@ -71,19 +103,20 @@ type Listener struct {
 	Listener           net.Listener
 	ProxyHeaderTimeout time.Duration
 	SourceCheck        SourceChecker
+	TLSConfig          *tls.Config
 }
 
 // Conn is used to wrap and underlying connection which
 // may be speaking the Proxy Protocol. If it is, the RemoteAddr() will
 // return the address of the client instead of the proxy address.
 type Conn struct {
-	bufReader          *bufio.Reader
 	conn               net.Conn
 	dstAddr            *net.TCPAddr
 	srcAddr            *net.TCPAddr
 	useConnRemoteAddr  bool
 	once               sync.Once
 	proxyHeaderTimeout time.Duration
+	tlsConfig          *tls.Config
 }
 
 // Accept waits for and returns the next connection to the listener.
@@ -107,7 +140,7 @@ func (p *Listener) Accept() (net.Conn, error) {
 			useConnRemoteAddr = true
 		}
 	}
-	newConn := NewConn(conn, p.ProxyHeaderTimeout)
+	newConn := NewConn(conn, p.ProxyHeaderTimeout, p.TLSConfig)
 	newConn.useConnRemoteAddr = useConnRemoteAddr
 	return newConn, nil
 }
@@ -124,11 +157,11 @@ func (p *Listener) Addr() net.Addr {
 
 // NewConn is used to wrap a net.Conn that may be speaking
 // the proxy protocol into a proxyproto.Conn
-func NewConn(conn net.Conn, timeout time.Duration) *Conn {
+func NewConn(conn net.Conn, timeout time.Duration, tlsConfig *tls.Config) *Conn {
 	pConn := &Conn{
-		bufReader:          bufio.NewReader(conn),
 		conn:               conn,
 		proxyHeaderTimeout: timeout,
+		tlsConfig:          tlsConfig,
 	}
 	return pConn
 }
@@ -136,7 +169,7 @@ func NewConn(conn net.Conn, timeout time.Duration) *Conn {
 // Read is check for the proxy protocol header when doing
 // the initial scan. If there is an error parsing the header,
 // it is returned and the socket is closed.
-func (p *Conn) Read(b []byte) (int, error) {
+func (p *Conn) Read(target []byte) (int, error) {
 	var err error
 	if EnableDebugging {
 		log.Debugf("tcp proxy protocol Read...")
@@ -145,7 +178,7 @@ func (p *Conn) Read(b []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return p.bufReader.Read(b)
+	return p.conn.Read(target)
 }
 
 func (p *Conn) Write(b []byte) (int, error) {
@@ -175,7 +208,6 @@ func (p *Conn) RemoteAddr() net.Addr {
 		if err := p.checkPrefix(); err != nil && err != io.EOF {
 			log.Printf("[ERR] Failed to read proxy prefix: %v", err)
 			p.Close()
-			p.bufReader = bufio.NewReader(p.conn)
 		}
 	})
 	if p.srcAddr != nil && !p.useConnRemoteAddr {
@@ -196,13 +228,14 @@ func (p *Conn) SetWriteDeadline(t time.Time) error {
 	return p.conn.SetWriteDeadline(t)
 }
 
-func (p *Conn) checkPrefix() error {
+func (p *Conn) checkPrefix() (err error) {
 	var hdr []byte
-	var err error
 	var srcIP net.IP
 	var dstIP net.IP
 	var srcPort int
 	var dstPort int
+	var peekBytes []byte
+	var bufReader *bufio.Reader
 
 	if EnableDebugging {
 		log.Debugf("tcp proxy protocol check prefix, timeout: %v...", p.proxyHeaderTimeout)
@@ -214,33 +247,70 @@ func (p *Conn) checkPrefix() error {
 		defer p.conn.SetReadDeadline(time.Time{})
 	}
 
-	for i := 1; i <= prefixV2Len; i++ {
-		var inp []byte
-		inp, err = p.bufReader.Peek(i)
+	defer func() {
+		if err == nil {
+			conn := p.conn
+
+			// If there are any leftover bytes that we have read, make sure to load them
+			// into a rewindConn so we can play them back on the next read
+			if len(peekBytes) > 0 || bufReader.Buffered() > 0 {
+				// If the buffered reader has bytes left that it read but didn't consume,
+				// we need to replay those
+				if bufReader.Buffered() > 0 {
+					buffered := make([]byte, bufReader.Buffered())
+					_, err = bufReader.Read(buffered)
+					if err != nil {
+						return
+					}
+					peekBytes = append(peekBytes, buffered...)
+				}
+				conn = newRewindConn(conn, bytes.NewReader(peekBytes))
+			}
+
+			if p.tlsConfig != nil {
+				// If we have no error, and a TLS config was specified, treat this conn as a TLS conn
+				p.conn = tls.Server(conn, p.tlsConfig)
+			} else {
+				p.conn = conn
+			}
+		}
+	}()
+
+	bufReader = bufio.NewReader(p.conn)
+	singleByte := make([]byte, 1)
+	for i := 0; i < prefixV2Len; i++ {
+		_, err := bufReader.Read(singleByte)
 
 		if EnableDebugging {
-			log.Debugf("tcp proxy protocol peek(%v): %v...", i, inp)
+			log.Debugf("tcp proxy protocol read byte(%v): %c(%v)...", i, singleByte, singleByte)
 		}
 
 		if err != nil {
 			if EnableDebugging {
-				log.Debugf("tcp proxy protocol peek error: %v...", err)
+				log.Debugf("tcp proxy protocol read error: %v...", err)
 			}
 			if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
 				return nil
 			}
 			return err
 		}
+		peekBytes = append(peekBytes, singleByte[0])
 
-		// Check for a prefix mis-match, quit early
-		if !bytes.HasPrefix(prefixV1, inp) && !bytes.HasPrefix(prefixV2, inp) {
+		// Check for a prefix mis-match, quit early. Note that peekBytes will not be set to nil,
+		// and so we will be creating a rewindConn from it above.
+		if bytes.Equal(peekBytes, prefixV1) || bytes.Equal(peekBytes, prefixV2) {
+			// Copy out peek bytes and set to nil, we will be reading now and any errors from this
+			// point on fail the connection (so we want the bytes to not be read by clients, we are
+			// processing the PROXY header now)
+			hdr = make([]byte, len(peekBytes))
+			copy(hdr, peekBytes)
+			peekBytes = nil
+			break
+		} else if (i >= prefixV1Len || singleByte[0] != prefixV1[i]) && singleByte[0] != prefixV2[i] {
 			if EnableDebugging {
 				log.Debugf("tcp proxy protocol header missing")
 			}
 			return nil
-		} else if bytes.Equal(inp, prefixV1) || bytes.Equal(inp, prefixV2) {
-			hdr = inp
-			break
 		}
 	}
 
@@ -256,11 +326,14 @@ func (p *Conn) checkPrefix() error {
 			log.Debugf("tcp proxy protocol version 1 detected")
 		}
 
-		header, err := p.bufReader.ReadString('\n')
+		header, err := bufReader.ReadString('\n')
 		if err != nil {
 			p.conn.Close()
 			return err
 		}
+
+		// Concatenete part which was read
+		header = string(hdr[:]) + header
 
 		// Strip the carriage return and new line
 		header = header[:len(header)-2]
@@ -314,32 +387,20 @@ func (p *Conn) checkPrefix() error {
 		}
 
 		var b byte
-		var signature []byte
 		var protocolVersionAndCommand byte
 		var transportProtocolAndAddressFamily byte
 		var dataLengthB []byte
 		var data []byte
 		var dataLength uint16
 
-		signature = make([]byte, prefixV2Len)
 		dataLengthB = make([]byte, 2)
 
-		// Read signature
-		for i := 0; i < prefixV2Len; i++ {
-			b, err = p.bufReader.ReadByte()
-			if err != nil {
-				p.conn.Close()
-				return err
-			}
-			signature[i] = b
-		}
-
 		if EnableDebugging {
-			log.Debugf("version 2 signature: % x", signature)
+			log.Debugf("version 2 signature: % x", hdr)
 		}
 
 		// Read protocol version and command
-		b, err = p.bufReader.ReadByte()
+		b, err = bufReader.ReadByte()
 		if err != nil {
 			p.conn.Close()
 			return err
@@ -356,7 +417,7 @@ func (p *Conn) checkPrefix() error {
 		}
 
 		// Read transport protocol and address family
-		b, err = p.bufReader.ReadByte()
+		b, err = bufReader.ReadByte()
 		if err != nil {
 			p.conn.Close()
 			return err
@@ -375,7 +436,7 @@ func (p *Conn) checkPrefix() error {
 
 		// Read data length
 		for i := 0; i < 2; i++ {
-			b, err = p.bufReader.ReadByte()
+			b, err = bufReader.ReadByte()
 			if err != nil {
 				p.conn.Close()
 				return err
@@ -391,7 +452,7 @@ func (p *Conn) checkPrefix() error {
 
 		data = make([]byte, dataLength)
 		for i := uint16(0); i < dataLength; i++ {
-			b, err = p.bufReader.ReadByte()
+			b, err = bufReader.ReadByte()
 			if err != nil {
 				p.conn.Close()
 				return err
